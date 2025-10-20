@@ -339,9 +339,12 @@ A continuación se detallan todas las pruebas de los endpoints con ejemplos de r
 
 ### Parte 2: Endpoints del Query API (Puerto 5001)
 
+> [!IMPORTANT]
+> Con el fin de ilustrar la funcionalidad, se registraron varias cuentas bancarias en esta etapa.
+
 #### 2.1 AccountLookupController - Obtener Todas las Cuentas
 
-**Endpoint**: `GET http://localhost:5001/api/v1/bankAccountLookup`
+**Endpoint**: `GET http://localhost:5001/api/v1/bankAccountLookup/`
 
 **Captura de Pantalla de Prueba**:
 
@@ -367,23 +370,25 @@ A continuación se detallan todas las pruebas de los endpoints con ejemplos de r
 
 **Endpoint**: `GET http://localhost:5001/api/v1/bankAccountLookup/withBalance/{equalityType}/{balance}`
 
-**Ejemplo 1 - Balance Mayor que 1000**:
+**Ejemplo 1 - Balance Mayor que 3000**:
 
-**Request**: `GET http://localhost:5001/api/v1/bankAccountLookup/withBalance/GREATER_THAN/1000`
+**Endpoint**: `GET http://localhost:5001/api/v1/bankAccountLookup/withBalance/GREATER_THAN/3000`
 
 **Captura de Pantalla de Prueba**:
 
 ![Get Account By Balance](docs/screenshots/08-get-account-by-balance.png)
 
-**Ejemplo 2 - Balance Menor que 1000**:
+**Ejemplo 2 - Balance Menor que 3000**:
 
-**Request**: `GET http://localhost:5001/api/v1/bankAccountLookup/withBalance/LESS_THAN/1000`
+**Endpoint**: `GET http://localhost:5001/api/v1/bankAccountLookup/withBalance/LESS_THAN/3000`
 
 **Captura de Pantalla de Prueba**:
 
 ![Get Account By Balance](docs/screenshots/09-get-account-by-balance.png)
 
 #### 2.5 RestoreReadDbController - Restaurar Base de Datos de Lectura
+
+**Endpoint**: `POST http://localhost:5000/api/v1/restoreReadDb`
 
 **Captura de Pantalla de Prueba**:
 
