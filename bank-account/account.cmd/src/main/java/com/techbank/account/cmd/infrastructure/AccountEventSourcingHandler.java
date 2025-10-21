@@ -44,8 +44,6 @@ public class AccountEventSourcingHandler implements EventSourcingHandler<Account
     public void republishEvents() {
         var aggregateIds = eventStore.getAggregateIds();
         for(var aggregateId: aggregateIds) {
-            var aggregate = getById(aggregateId);
-            if (aggregate == null || !aggregate.getActive()) continue;
             var events = eventStore.getEvents(aggregateId);
             for(var event: events) {
                 eventProducer.produce(topic, event);
