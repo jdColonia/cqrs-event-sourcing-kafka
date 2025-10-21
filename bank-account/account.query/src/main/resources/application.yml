@@ -3,19 +3,19 @@ server:
 
 spring:
   jpa:
-#     MySQL jpa settings
     database-platform: org.hibernate.dialect.MySQL8Dialect
     show-sql: true
     hibernate:
       ddl-auto: update
   datasource:
-    #MySQL datasource settings
-      url: jdbc:mysql://localhost:3306/bankAccount?createDatabaseIfNotExist=true
-      username: root
-      password: techbankRootPsw
+    url: jdbc:mysql://localhost:3306/bankAccount?createDatabaseIfNotExist=true
+    username: root
+    password: techbankRootPsw
   kafka:
+    topic: BankAccountEvents
     listener:
       ack-mode: MANUAL_IMMEDIATE
+      poll-timeout: 900000
     consumer:
       bootstrap-servers: localhost:29092
       group-id: bankaccConsumer
