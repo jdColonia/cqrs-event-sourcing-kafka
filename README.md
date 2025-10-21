@@ -20,6 +20,7 @@ Sistema bancario implementando los patrones **CQRS** (Command Query Responsibili
 - [Configuración e Instalación](#configuración-e-instalación)
 - [Ejecución](#ejecución)
 - [Pruebas de Endpoints](#pruebas-de-endpoints)
+- [Garantía del Orden de Consumo de Eventos](#parte-2-garantía-del-orden-de-consumo-de-eventos)
 
 ## Arquitectura
 
@@ -393,3 +394,299 @@ A continuación se detallan todas las pruebas de los endpoints con ejemplos de r
 **Captura de Pantalla de Prueba**:
 
 ![Restore Read DB](docs/screenshots/10-restore-read-db.png)
+
+## Parte 2: Garantía del Orden de Consumo de Eventos
+
+### Problemática
+
+En la implementación inicial del sistema CQRS con Event Sourcing, cada tipo de evento se enviaba a un **topic diferente de Kafka**. Esto generaba un problema crítico: **no se podía garantizar el orden de consumo de los eventos** cuando se restauraba la base de datos de lectura desde el Event Store.
+
+### Problemática Específica
+
+- **AccountOpenedEvent** → Topic: `AccountOpenedEvent`
+- **FundsDepositedEvent** → Topic: `FundsDepositedEvent`
+- **FundsWithdrawnEvent** → Topic: `FundsWithdrawnEvent`
+- **AccountClosedEvent** → Topic: `AccountClosedEvent`
+
+Cada topic tiene su propio **commit offset/index** independiente, por lo que cuando los eventos se reproducen desde el Event Store, pueden llegar al consumidor en un orden diferente al que fueron generados.
+
+### Solución Implementada: Topic Único
+
+Para garantizar el orden de los eventos, **todos los eventos deben ser producidos al mismo topic único de Kafka**. De esta manera, todos los mensajes de eventos compartirán el mismo commit offset/index, garantizando que se consuman en el mismo orden que fueron producidos.
+
+### Cambios Realizados
+
+#### A. Lado Command (Productor)
+
+##### 1. Actualización de `application.yml` de `account.cmd`
+
+```yaml
+spring:
+  data:
+    mongodb:
+      host: localhost
+      port: 27017
+      database: bankAccount
+  kafka:
+    producer:
+      bootstrap-servers: localhost:29092
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    topic: BankAccountEvents # ← AGREGADO: Topic único para todos los eventos
+```
+
+##### 2. Modificación de `AccountEventStore`
+
+**Cambios realizados:**
+
+```java
+@Service
+public class AccountEventStore implements EventStore {
+    @Autowired
+    private EventProducer eventProducer;
+
+    @Autowired
+    private EventStoreRepository eventStoreRepository;
+
+    // CAMBIO #1: Agregar campo para el topic único
+    @Value("${spring.kafka.topic}")
+    private String topic;
+
+    @Override
+    public void saveEvents(String aggregateId, Iterable<BaseEvent> events, int expectedVersion) {
+        // ... lógica existente ...
+
+        for (var event: events) {
+           // ... lógica de persistencia ...
+
+           if (!persistedEvent.getId().isEmpty()) {
+               // CAMBIO #2: Usar topic único en lugar del nombre del evento
+               eventProducer.produce(topic, event);  // Antes: event.getClass().getSimpleName()
+           }
+        }
+    }
+}
+```
+
+##### 3. Modificación de `AccountEventSourcingHandler`
+
+**Cambios realizados:**
+
+```java
+@Service
+public class AccountEventSourcingHandler implements EventSourcingHandler<AccountAggregate> {
+    @Autowired
+    private EventStore eventStore;
+
+    @Autowired
+    private EventProducer eventProducer;
+
+    // CAMBIO #1: Agregar campo para el topic único
+    @Value("${spring.kafka.topic}")
+    private String topic;
+
+    @Override
+    public void republishEvents() {
+        var aggregateIds = eventStore.getAggregateIds();
+        for(var aggregateId: aggregateIds) {
+            var aggregate = getById(aggregateId);
+            if (aggregate == null || !aggregate.getActive()) continue;
+            var events = eventStore.getEvents(aggregateId);
+            for(var event: events) {
+                // CAMBIO #2: Usar topic único en lugar del nombre del evento
+                eventProducer.produce(topic, event);  // Antes: event.getClass().getSimpleName()
+            }
+        }
+    }
+}
+```
+
+#### B. Lado Query (Consumidor)
+
+##### 1. Actualización de `application.yml` de `account.query`
+
+```yaml
+spring:
+  jpa:
+    database-platform: org.hibernate.dialect.MySQL8Dialect
+    show-sql: true
+    hibernate:
+      ddl-auto: update
+  datasource:
+    url: jdbc:mysql://localhost:3306/bankAccount?createDatabaseIfNotExist=true
+    username: root
+    password: techbankRootPsw
+  kafka:
+    topic: BankAccountEvents # ← AGREGADO: Topic único para consumir eventos
+    listener:
+      ack-mode: MANUAL_IMMEDIATE
+      poll-timeout: 900000 # ← AGREGADO: 15 minutos para debugging
+    consumer:
+      bootstrap-servers: localhost:29092
+      group-id: bankaccConsumer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring:
+          json:
+            trusted:
+              packages: '*'
+```
+
+##### 2. Modificación de `EventConsumer` Interface
+
+**Antes (múltiples métodos):**
+
+```java
+public interface EventConsumer {
+    void consume(@Payload AccountOpenedEvent event, Acknowledgment ack);
+    void consume(@Payload FundsDepositedEvent event, Acknowledgment ack);
+    void consume(@Payload FundsWithdrawnEvent event, Acknowledgment ack);
+    void consume(@Payload AccountClosedEvent event, Acknowledgment ack);
+}
+```
+
+**Después (método único):**
+
+```java
+public interface EventConsumer {
+    void consume(@Payload BaseEvent event, Acknowledgment ack);
+}
+```
+
+##### 3. Modificación de `AccountEventConsumer`
+
+**Antes (múltiples listeners):**
+
+```java
+@Service
+public class AccountEventConsumer implements EventConsumer {
+    @Autowired
+    private EventHandler eventHandler;
+
+    @KafkaListener(topics = "AccountOpenedEvent", groupId = "...")
+    public void consume(@Payload AccountOpenedEvent event, Acknowledgment ack) {
+        this.eventHandler.on(event);
+        ack.acknowledge();
+    }
+
+    @KafkaListener(topics = "FundsDepositedEvent", groupId = "...")
+    public void consume(@Payload FundsDepositedEvent event, Acknowledgment ack) {
+        this.eventHandler.on(event);
+        ack.acknowledge();
+    }
+
+    // ... más listeners para cada tipo de evento
+}
+```
+
+**Después (listener único con reflexión):**
+
+```java
+@Service
+public class AccountEventConsumer implements EventConsumer {
+    @Autowired
+    private EventHandler eventHandler;
+
+    @KafkaListener(topics = "${spring.kafka.topic}", groupId = "${spring.kafka.consumer.group-id}")
+    @Override
+    public void consume(@Payload BaseEvent event, Acknowledgment ack) {
+        try {
+            // Usar reflexión para invocar el método correcto del EventHandler
+            var eventHandlerMethod = eventHandler.getClass().getDeclaredMethod("on", event.getClass());
+            eventHandlerMethod.setAccessible(true);
+            eventHandlerMethod.invoke(eventHandler, event);
+            ack.acknowledge();
+        } catch (Exception e) {
+            throw new RuntimeException("Error while consuming event", e);
+        }
+    }
+}
+```
+
+### Importancia en CQRS y Event Sourcing
+
+#### Event Sourcing
+
+En Event Sourcing, **el orden de los eventos es crítico** porque:
+
+- Los eventos representan cambios de estado **secuenciales**
+- El estado actual se reconstruye **reproduciendo todos los eventos en orden**
+- Un evento aplicado fuera de orden puede generar un **estado incorrecto**
+
+**Ejemplo de problema sin orden garantizado:**
+
+```
+Secuencia correcta:
+1. AccountOpenedEvent (balance: 1000)
+2. FundsDepositedEvent (amount: 500) → balance: 1500
+3. FundsWithdrawnEvent (amount: 200) → balance: 1300
+
+Secuencia incorrecta:
+1. AccountOpenedEvent (balance: 1000)
+2. FundsWithdrawnEvent (amount: 200) → ERROR: balance insuficiente
+3. FundsDepositedEvent (amount: 500) → No se puede aplicar
+```
+
+#### CQRS
+
+En CQRS, **la sincronización entre Command y Query** requiere:
+
+- **Consistencia eventual**: El Query side debe reflejar eventualmente todos los cambios del Command side
+- **Orden preservado**: Los cambios deben aplicarse en el Query side en el mismo orden que ocurrieron en el Command side
+
+### Prueba de la Implementación
+
+Para verificar que el orden de eventos está garantizado:
+
+#### 1. Realizar una Serie de Operaciones
+
+```bash
+# 1. Abrir cuenta
+POST /api/v1/openBankAccount
+
+# 2. Depositar fondos
+PUT /api/v1/depositFunds/{id}
+
+# 3. Retirar fondos
+PUT /api/v1/withdrawFunds/{id}
+
+# 4. Cerrar cuenta
+DELETE /api/v1/closeBankAccount/{id}
+```
+
+**Captura de Pantalla - Operaciones Realizadas**:
+
+![Operaciones Antes de Reiniciar](docs/screenshots/11-operations-before-restart.png)
+
+_Esta captura muestra la secuencia de operaciones realizadas antes de reiniciar el servicio para probar la reproducción de eventos._
+
+#### 2. Reiniciar el Servicio Query
+
+```bash
+docker-compose restart account-query
+```
+
+#### 3. Restaurar la Base de Datos de Lectura
+
+```bash
+POST /api/v1/restoreReadDb
+```
+
+#### 4. Verificar los Logs
+
+Para ver los eventos siendo consumidos en orden, ejecuta:
+
+```bash
+# Ver logs en tiempo real del servicio query
+docker-compose logs -f account-query
+```
+
+En los logs del servicio `account-query`, vemos los eventos siendo consumidos **en el orden correcto**.
+
+**Captura de Pantalla - Orden de Consumo de Eventos**:
+
+![Orden de Consumo de Eventos](docs/screenshots/12-event-consumption-order.png)
+
+_Esta captura muestra los logs del servicio query después de reiniciar, demostrando que los eventos se consumen en el orden correcto durante la reproducción desde el Event Store._
